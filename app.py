@@ -1,41 +1,58 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS # type: ignore
+from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, unset_jwt_cookies
+from flask_migrate import Migrate
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt, unset_jwt_cookies
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
-app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'  # Change this to a random secret key
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///test.db'
+app.config['JWT_SECRET_KEY'] = 'your_jwt_secret_key'
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 jwt = JWTManager(app)
-CORS(app)
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(80), nullable=False)
+    password = db.Column(db.String(120), nullable=False)
 
-@app.route('/signup', methods=['POST'])
-def signup():
+class TokenBlocklist(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    jti = db.Column(db.String(36), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+
+@jwt.token_in_blocklist_loader
+def check_if_token_revoked(jwt_header, jwt_payload):
+    jti = jwt_payload['jti']
+    token = TokenBlocklist.query.filter_by(jti=jti).first()
+    return token is not None
+
+@app.route('/register', methods=['POST'])
+def register():
     data = request.get_json()
     new_user = User(username=data['username'], password=data['password'])
     db.session.add(new_user)
     db.session.commit()
-    return jsonify({"message": "User created successfully"}), 201
+    return jsonify({"message": "User registered successfully"}), 201
 
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(username=data['username'], password=data['password']).first()
-    if user:
-        access_token = create_access_token(identity={'username': user.username})
-        return jsonify(access_token=access_token), 200
-    else:
+    if not user:
         return jsonify({"message": "Invalid credentials"}), 401
+    
+    access_token = create_access_token(identity=user.id)
+    return jsonify(access_token=access_token)
 
 @app.route('/logout', methods=['POST'])
 @jwt_required()
 def logout():
+    jti = get_jwt()['jti']
+    db.session.add(TokenBlocklist(jti=jti, created_at=datetime.utcnow()))
+    db.session.commit()
     response = jsonify({"message": "Successfully logged out"})
     unset_jwt_cookies(response)
     return response
@@ -43,20 +60,7 @@ def logout():
 @app.route('/protected', methods=['GET'])
 @jwt_required()
 def protected():
-    current_user = get_jwt_identity()
-    return jsonify(logged_in_as=current_user), 200
-
-@app.route('/public', methods=['GET'])
-def public():
-    return jsonify(message="This is a public route"), 200
-
-@app.route('/private', methods=['GET'])
-@jwt_required()
-def private():
-    current_user = get_jwt_identity()
-    return jsonify(message="This is a private route", user=current_user), 200
+    return jsonify({"message": "This is a protected route"})
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
